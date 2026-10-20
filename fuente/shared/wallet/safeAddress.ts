@@ -28,6 +28,7 @@ import { toAccount } from "viem/accounts";
 import { entryPoint07Address } from "viem/account-abstraction";
 import { toSafeSmartAccount } from "permissionless/accounts";
 import { SAFE_ENTRY_POINT_VERSION, SAFE_VERSION } from "./safeConfig";
+import { canonicalOwners } from "./safeMultisig";
 
 /** SafeProxyFactory 1.4.1 (canónica, misma dirección en todas las redes). */
 export const SAFE_PROXY_FACTORY_1_4_1 = "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67" as const;
@@ -97,6 +98,33 @@ export async function counterfactualSafeAddress(owner: Address, saltNonce: bigin
   const account = await toSafeSmartAccount({
     client: offlineClient(),
     owners: [addressOnlyOwner(owner)],
+    version: SAFE_VERSION,
+    entryPoint: { address: entryPoint07Address, version: SAFE_ENTRY_POINT_VERSION },
+    saltNonce,
+  });
+  return account.address;
+}
+
+/**
+ * Dirección de una MULTIFIRMA del monedero (N dueños, quórum `threshold`),
+ * igual a la que calcula `multisigSafeAddress` con red: mismos dueños en orden
+ * canónico, mismo quórum y mismo `saltNonce`. Sirve al firmador sin conexión
+ * (`docs/FIRMADOR-SIN-CONEXION.md` §«Multifirma EVM»), que comprueba que la
+ * multifirma que le enseñan es de verdad la de esas llaves antes de apuntarla.
+ */
+export async function counterfactualMultisigAddress(
+  owners: readonly Address[],
+  threshold: number,
+  saltNonce: bigint,
+): Promise<Address> {
+  const order = canonicalOwners(owners);
+  if (!Number.isInteger(threshold) || threshold < 1 || threshold > order.length) {
+    throw new Error(`Quórum no válido: ${threshold} de ${order.length}.`);
+  }
+  const account = await toSafeSmartAccount({
+    client: offlineClient(),
+    owners: order.map(addressOnlyOwner),
+    threshold: BigInt(threshold),
     version: SAFE_VERSION,
     entryPoint: { address: entryPoint07Address, version: SAFE_ENTRY_POINT_VERSION },
     saltNonce,
