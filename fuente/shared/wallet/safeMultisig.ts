@@ -1,6 +1,6 @@
 /**
  * Multifirma EVM: un Safe con N llaves y un quórum configurable (por defecto
- * 2 de 3: aparato, Mucho Wallet y una llave de respaldo; `docs/MULTIFIRMA-EVM.md`). Reglas PURAS, compartidas por la página de prueba
+ * 2 de 3: aparato, (mucho) wallet y una llave de respaldo; `docs/MULTIFIRMA-EVM.md`). Reglas PURAS, compartidas por la página de prueba
  * y lo que venga después: qué dueños valen, en qué orden, qué se firma en la
  * ejecución clásica (`execTransaction`) y cómo se juntan las firmas.
  *
@@ -25,12 +25,17 @@ import {
 /** El quórum de siempre (y el de las multifirmas guardadas sin umbral). */
 export const SAFE_MULTISIG_THRESHOLD = 2;
 export const SAFE_MULTISIG_OWNERS = 3;
-/** Cuántas llaves puede tener una multifirma del monedero. */
-export const MULTISIG_MIN_OWNERS = 2;
+/**
+ * Cuántas llaves puede tener una multifirma del monedero. Desde UNA (21-10-2026,
+ * decisión del dueño): Safe admite un solo dueño con umbral 1, y es la forma de
+ * guardar dólares con el MuchoSigner (un móvil viejo sin conexión) como única
+ * llave, porque el firmador solo firma `SafeTx` de una multifirma registrada.
+ */
+export const MULTISIG_MIN_OWNERS = 1;
 export const MULTISIG_MAX_OWNERS = 10;
 
 /**
- * Ruta de la cuenta de Mucho Wallet DEDICADA a la multifirma: una rama propia
+ * Ruta de la cuenta de (mucho) wallet DEDICADA a la multifirma: una rama propia
  * (`/7/`), fuera de la de las cuentas (`/0/`) y de la de trading (`/1/`), así
  * que no sale en la home ni se mezcla con ningún saldo. Una llave que solo es
  * dueña de un Safe no tiene por qué firmar nada más.
@@ -280,7 +285,7 @@ export type MultisigRole = "device" | "mucho" | "backup";
 export type MultisigKeyOrigin =
   /** Una cuenta EVM de un Ledger u OneKey (el store de hardware de ESE navegador). */
   | { kind: "device" }
-  /** Cuenta dedicada de la Mucho Wallet del usuario (rama `/7/`). */
+  /** Cuenta dedicada de la (mucho) wallet del usuario (rama `/7/`). */
   | { kind: "mucho"; path: string }
   /**
    * Una llave de respaldo: sub-org de Turnkey cuyo único acceso son sus
@@ -355,14 +360,14 @@ export function parseMultisigScopeId(stored: string | null | undefined): string 
 /** Nombre de cada llave de las multifirmas 2 de 3 de antes. */
 export const MULTISIG_ROLE_LABEL: Record<MultisigRole, string> = {
   device: "Tu hardware wallet",
-  mucho: "Tu Mucho Wallet",
+  mucho: "Tu (mucho) wallet",
   backup: "Tu llave de respaldo",
 };
 
 /** Nombre por defecto de una llave según de dónde sale. */
 export const MULTISIG_ORIGIN_LABEL: Record<MultisigKeyOrigin["kind"], string> = {
   device: "Hardware wallet",
-  mucho: "Tu Mucho Wallet",
+  mucho: "Tu (mucho) wallet",
   "security-key": "Llave de respaldo",
   external: "Otra persona",
 };
@@ -378,7 +383,7 @@ export function signableHere(o: Pick<MultisigOwnerDef, "origin">): boolean {
 }
 
 /**
- * Qué llaves firman por defecto: las del día a día primero (la Mucho Wallet,
+ * Qué llaves firman por defecto: las del día a día primero (la (mucho) wallet,
  * luego los aparatos) y las llaves de respaldo al final, hasta llegar al
  * quórum. `canSign` dice si en ESTE navegador puede firmar (un aparato que no
  * está añadido aquí, no).
@@ -415,6 +420,21 @@ export interface QuorumWarning {
 export function quorumWarnings(threshold: number, owners: readonly Pick<MultisigOwnerDef, "origin">[]): QuorumWarning[] {
   const n = owners.length;
   const out: QuorumWarning[] = [];
+  if (n === 1) {
+    // Con una sola llave los dos extremos de abajo saltarían a la vez y se
+    // contradirían; lo que hay que decir es uno solo.
+    out.push({
+      level: "danger",
+      text: "Con UNA sola llave, quien tenga su frase mueve todo el dinero, y si la pierdes nadie —tampoco nosotros— puede recuperarlo. Es como una cuenta de firma única: guarda esa frase con el mismo cuidado.",
+    });
+    if (!signableHere(owners[0]!)) {
+      out.push({
+        level: "warning",
+        text: "Esa llave no firma desde este monedero: cada operación la firmará ella, desde un enlace (o por QR si es tu firmador sin conexión), y una cuenta tuya pagará el gas para ejecutarla.",
+      });
+    }
+    return out;
+  }
   if (threshold === 1) {
     out.push({
       level: "danger",
@@ -431,7 +451,7 @@ export function quorumWarnings(threshold: number, owners: readonly Pick<Multisig
   if (here < threshold) {
     out.push({
       level: "warning",
-      text: `Desde este monedero solo firman ${here} de las llaves y hacen falta ${threshold}: para mover el dinero, la otra persona tendrá que firmar cada operación desde un enlace que le mandes.`,
+      text: `Desde este monedero solo firman ${here} de las llaves y hacen falta ${threshold}: para mover el dinero, cada operación la tendrá que firmar una llave de fuera — otra persona desde un enlace que le mandes, o tu firmador sin conexión por QR.`,
     });
   }
   const external = n - here;
@@ -445,9 +465,9 @@ export function quorumWarnings(threshold: number, owners: readonly Pick<Multisig
 }
 
 /**
- * ¿Es válida una multifirma antes de guardarla? Entre 2 y 10 llaves
+ * ¿Es válida una multifirma antes de guardarla? Entre 1 y 10 llaves
  * distintas, un quórum entre 1 y el número de llaves (las de otra persona
- * cuentan: firman por el buzón, §14), como mucho una cuenta de la Mucho Wallet (en la rama `/7/`) y
+ * cuentan: firman por el buzón, §14), como mucho una cuenta de la (mucho) wallet (en la rama `/7/`) y
  * nombres razonables. Devuelve el motivo o null.
  */
 export function multisigDefProblem(def: Omit<MultisigDef, "id" | "createdAt">): string | null {
@@ -467,21 +487,21 @@ export function multisigDefProblem(def: Omit<MultisigDef, "id" | "createdAt">): 
     return e instanceof Error ? e.message : "Dueños no válidos.";
   }
   if (def.owners.filter((o) => o.origin.kind === "mucho").length > 1) {
-    return "Solo puede haber una llave de la Mucho Wallet.";
+    return "Solo puede haber una llave de la (mucho) wallet.";
   }
   for (const o of def.owners) {
     if (o.label !== undefined && (o.label.trim().length === 0 || o.label.length > MULTISIG_LABEL_MAX)) {
       return "El nombre de una llave no es válido.";
     }
     if (o.origin.kind === "mucho" && !/^m\/44'\/60'\/0'\/7\/\d+$/.test(o.origin.path)) {
-      return "La llave de la Mucho Wallet tiene que ser su cuenta dedicada.";
+      return "La llave de la (mucho) wallet tiene que ser su cuenta dedicada.";
     }
     if (o.origin.kind === "security-key" && !/^[0-9a-f-]{8,64}$/i.test(o.origin.subOrgId)) {
       return "La llave de respaldo no es válida.";
     }
     // Las de antes conservan su papel; un papel tiene que casar con su origen.
-    if (o.role === "mucho" && o.origin.kind !== "mucho") return "La llave de la Mucho Wallet no es válida.";
-    if (o.role && o.role !== "mucho" && o.origin.kind === "mucho") return "Esa llave no puede ser de la Mucho Wallet.";
+    if (o.role === "mucho" && o.origin.kind !== "mucho") return "La llave de la (mucho) wallet no es válida.";
+    if (o.role && o.role !== "mucho" && o.origin.kind === "mucho") return "Esa llave no puede ser de la (mucho) wallet.";
   }
   return null;
 }

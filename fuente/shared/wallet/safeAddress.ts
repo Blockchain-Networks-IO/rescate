@@ -109,7 +109,7 @@ export async function counterfactualSafeAddress(owner: Address, saltNonce: bigin
  * Dirección de una MULTIFIRMA del monedero (N dueños, quórum `threshold`),
  * igual a la que calcula `multisigSafeAddress` con red: mismos dueños en orden
  * canónico, mismo quórum y mismo `saltNonce`. Sirve al firmador sin conexión
- * (`docs/FIRMADOR-SIN-CONEXION.md` §«Multifirma EVM»), que comprueba que la
+ * (`docs/MUCHOSIGNER.md` §«Multifirma EVM»), que comprueba que la
  * multifirma que le enseñan es de verdad la de esas llaves antes de apuntarla.
  */
 export async function counterfactualMultisigAddress(
