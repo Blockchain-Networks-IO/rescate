@@ -117,8 +117,8 @@ const html = `<!doctype html>
 
 <div id="search" hidden>
 <h2>2. Buscar</h2>
-<div class="row">Cuántas direcciones mirar <input id="count" type="number" min="1" max="500" value="40" style="width:6rem"></div>
-<p class="muted fkonlyinline" hidden>Cada dirección de Fluidkey se mira en todas las configuraciones con las que Fluidkey ha creado cuentas (con y sin auto-earn), y también sus bóvedas de auto-earn en Base. Si tenías muchos cobros, sube el número.</p>
+<div class="row">Desde la dirección nº <input id="from" type="number" min="1" value="1" style="width:6rem"> mirar <input id="count" type="number" min="1" max="500" value="40" style="width:6rem"> direcciones</div>
+<p class="muted fkonlyinline" hidden>Cada dirección de Fluidkey se mira en todas las configuraciones con las que Fluidkey ha creado cuentas (con y sin auto-earn), y también sus bóvedas de auto-earn en Base. Se miran como mucho 200 de una vez: si tenías muchos cobros, al acabar pulsa «Buscar de la … a la …» para seguir con las siguientes (lo encontrado se suma).</p>
 <p class="muted" id="rpcnote">Cada red se lee por un nodo público (el de la casilla) y, si falla, por otro de respaldo. Puedes poner el tuyo. Una lectura que falla se dice: nunca se da por cero.</p>
 <div id="chains"></div>
 <div class="row">Añadir un token: <select id="extrachain"></select> <input id="extratoken" placeholder="contrato 0x…" style="flex:1"></div>
@@ -135,7 +135,7 @@ const html = `<!doctype html>
   <p class="muted">El gas lo paga esa cuenta, así que la moneda nativa de las direcciones de depósito sale entera. Si el Safe no estaba desplegado, primero se despliega (otra transacción).</p>
 </fieldset>
 <label><input type="checkbox" id="linkok"> Entiendo que mandarlo todo a una dirección, y pagar el gas desde una cuenta mía, deja escrito en cadena que esos cobros son míos.</label>
-<div class="row"><button id="moveall">Mover todo</button></div>
+<div class="row"><button id="moveall">Mover lo marcado</button></div>
 <div id="movelog"></div>
 </div>
 

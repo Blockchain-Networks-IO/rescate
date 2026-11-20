@@ -119,19 +119,20 @@ export function fluidkeyProfile(id: string): FluidkeyProfile {
 }
 
 /**
- * Los Safes de los nonces `0..count-1`, uno por configuración. El `chainId`
+ * Los Safes de los nonces `from..from+count-1`, uno por configuración. El `chainId`
  * de la derivación es 0 (el que usa Fluidkey: un mismo cobro vale en todas las
  * redes); se puede cambiar por si alguna cuenta antigua usó otro.
  */
 export function fluidkeyNotes(
   keySets: StealthMasterKeys[],
   count: number,
-  opts: { profiles?: FluidkeyProfile[]; derivationChainId?: number } = {},
+  opts: { profiles?: FluidkeyProfile[]; derivationChainId?: number; from?: number } = {},
 ): RescueNote[] {
   const profiles = opts.profiles ?? FLUIDKEY_PROFILES;
   const out: RescueNote[] = [];
   for (let k = 0; k < keySets.length; k++) {
-    for (let n = 0; n < count; n++) {
+    const from = opts.from ?? 0;
+    for (let n = from; n < from + count; n++) {
       const acc = deriveStealthAccount(keySets[k]!, { nonce: BigInt(n), chainId: opts.derivationChainId ?? 0 });
       for (const p of profiles) {
         out.push({

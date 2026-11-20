@@ -314,7 +314,27 @@ async function useSeed() {
 
 // ── Buscar ──
 let notes: RescueNote[] = [];
+/** El tramo buscado la última vez, para ofrecer el siguiente. */
+let lastRange = { from: 0, count: 0, cut: false };
 let holdings: Array<RescueHolding & { chain: ChainKey; deployed: boolean; underlying?: string }> = [];
+/**
+ * Qué filas se mueven (casilla «Mover» de cada una). Clave por red, Safe y
+ * token, para que sobreviva a «Buscar las siguientes». Lo que no está en el
+ * mapa se decide al pintarlo (`defaultSelected`).
+ */
+const selected = new Map<string, boolean>();
+const holdingKey = (h: { chain: ChainKey; note: RescueNote; asset: RescueAsset }) =>
+  `${h.chain}|${h.note.safe}|${h.asset.token ?? "nativo"}`;
+/**
+ * Por defecto se marca todo menos el polvo de moneda nativa: 0,000000001 ETH
+ * cuesta más de gas (y de un despliegue, si hace falta) de lo que vale.
+ */
+function defaultSelected(h: { asset: RescueAsset; balance: bigint }): boolean {
+  return !(h.asset.token === null && h.balance < 10n ** BigInt(Math.max(0, h.asset.decimals - 4)));
+}
+function isSelected(h: (typeof holdings)[number]): boolean {
+  return selected.get(holdingKey(h)) ?? defaultSelected(h);
+}
 
 function selectedChains(): ChainKey[] {
   return RESCUE_CHAINS.filter((c) => $<HTMLInputElement>(`chain-${c}`).checked);
@@ -336,18 +356,30 @@ async function extraAssets(): Promise<RescueAsset[]> {
   return [{ chain, symbol, token: getAddress(token), decimals }];
 }
 
-async function search() {
+async function search(opts: { keep?: boolean } = {}) {
   if (!keySets) return;
   const fk = mode() === "fluidkey";
-  // En Fluidkey cada nonce son tantos Safes como configuraciones: tope más bajo.
-  const count = Math.min(fk ? 200 : 500, Math.max(1, Number($<HTMLInputElement>("count").value || "40")));
-  $("searchres").innerHTML = `<p class="info">Calculando ${count} direcciones${fk ? " (cada una en todas las configuraciones de Fluidkey)" : ""} y leyendo saldos…</p>`;
+  // En Fluidkey cada nonce son tantos Safes como configuraciones: tope por
+  // pasada más bajo. Lo que pasa del tope NO se recorta en silencio: se dice y
+  // se ofrece seguir desde donde se quedó («Desde la dirección nº»).
+  const max = fk ? 200 : 500;
+  const asked = Math.max(1, Number($<HTMLInputElement>("count").value || "40"));
+  const count = Math.min(max, asked);
+  const from = Math.max(0, Number($<HTMLInputElement>("from").value || "1") - 1);
+  if (count < asked) $<HTMLInputElement>("count").value = String(count);
+  $("searchres").innerHTML = `<p class="info">Calculando las direcciones ${from + 1} a ${from + count}${fk ? " (cada una en todas las configuraciones de Fluidkey)" : ""}…</p>`;
   try {
-    notes = fk
-      ? fluidkeyNotes(keySets, count, { derivationChainId: Number($<HTMLInputElement>("fkchainid").value || "0") })
-      : await rescueNotes(keySets, count);
+    const newNotes = fk
+      ? fluidkeyNotes(keySets, count, { from, derivationChainId: Number($<HTMLInputElement>("fkchainid").value || "0") })
+      : await rescueNotes(keySets, count, from);
+    // Con «Buscar las siguientes», lo de antes se conserva (el CSV y «Mover
+    // todo» cubren todos los tramos mirados); una búsqueda nueva empieza de cero.
+    const previous = opts.keep ? holdings : [];
+    notes = opts.keep ? [...notes, ...newNotes] : newNotes;
+    lastRange = { from, count, cut: count < asked };
+    const noteCount = newNotes.length;
     const typed = await extraAssets();
-    holdings = [];
+    holdings = [...previous];
     const failures: string[] = [];
     // Todas las redes a la vez, con el progreso de cada una a la vista: sin él,
     // una búsqueda de un minuto parecía colgada.
@@ -363,7 +395,7 @@ async function search() {
       chains.map(async (chain) => {
         const client = rescueClient(chain, rpcOf(chain));
         const extra = fk ? [...typed, ...fluidkeyExtraAssets(chain)] : typed;
-        const { holdings: found, failed } = await readHoldings(client, notes, assetsFor(chain, extra), (done, total) => {
+        const { holdings: found, failed } = await readHoldings(client, notes.slice(notes.length - noteCount), assetsFor(chain, extra), (done, total) => {
           progress.set(chain, `${Math.round((done / Math.max(1, total)) * 100)} %`);
           paintProgress();
         });
@@ -416,16 +448,17 @@ function paintHoldings(failures: string[]) {
     const sets = new Set(holdings.map((h) => h.note.keySet));
     parts.push(`<p class="ok">Encontrado saldo en ${holdings.length} ${holdings.length === 1 ? "sitio" : "sitios"}.</p>`);
     parts.push(
-      "<table><tr><th>Dirección nº</th><th>Red</th><th>Cantidad</th><th>Safe</th><th>Desplegado</th></tr>" +
+      `<p class="muted">Marca en «Mover» lo que quieres sacar (puedes sacar una sola dirección). El polvo de moneda nativa viene sin marcar: moverlo cuesta más de lo que vale.</p>` +
+        "<table><tr><th>Mover</th><th>Dirección nº</th><th>Red</th><th>Cantidad</th><th>Safe</th><th>Desplegado</th></tr>" +
         holdings
-          .map((h) => {
+          .map((h, i) => {
             const c = getChain(h.chain);
             const link = c.explorer ? `${c.explorer}/address/${h.note.safe}` : "#";
             const profile = h.note.fluidkeyProfile ? ` <span class="muted">· ${esc(fluidkeyProfile(h.note.fluidkeyProfile).label)}</span>` : "";
             const amount = h.asset.vault
               ? `${esc(h.underlying ?? "valor sin leer")} <span class="muted">(en la bóveda ${esc(h.asset.symbol)}; se saca al destino como el activo de debajo)</span>`
               : `${esc(formatUnits(h.balance, h.asset.decimals))} ${esc(h.asset.symbol)}`;
-            return `<tr><td>${h.note.nonce + 1}${sets.size > 1 ? ` (${h.note.keySet + 1})` : ""}${profile}</td><td>${esc(c.name)}</td><td>${amount}</td><td><a href="${esc(link)}" target="_blank" rel="noreferrer"><code>${h.note.safe.slice(
+            return `<tr><td><input type="checkbox" class="pick" data-i="${i}" ${isSelected(h) ? "checked" : ""}></td><td>${h.note.nonce + 1}${sets.size > 1 ? ` (${h.note.keySet + 1})` : ""}${profile}</td><td>${esc(c.name)}</td><td>${amount}</td><td><a href="${esc(link)}" target="_blank" rel="noreferrer"><code>${h.note.safe.slice(
               0,
               10,
             )}…</code></a></td><td>${h.deployed ? "sí" : "no (se despliega al sacar)"}</td></tr>`;
@@ -435,7 +468,23 @@ function paintHoldings(failures: string[]) {
     );
     $("move").hidden = false;
   }
+  const next = lastRange.from + lastRange.count;
+  parts.push(
+    `<p class="info">Has mirado de la dirección ${lastRange.from + 1} a la ${next}.${lastRange.cut ? ` Se miran como mucho ${lastRange.count} de una vez.` : ""} Si tenías más cobros, mira las siguientes: <button id="nextrange">Buscar de la ${next + 1} a la ${next + lastRange.count}</button></p>`,
+  );
   box.innerHTML = parts.join("");
+  for (const el of Array.from(box.querySelectorAll<HTMLInputElement>("input.pick"))) {
+    el.onchange = () => {
+      const h = holdings[Number(el.dataset.i)];
+      if (h) selected.set(holdingKey(h), el.checked);
+    };
+  }
+  $("nextrange").onclick = () => {
+    // Lo ya encontrado se queda en la lista de «Sacarlo»: se busca el tramo
+    // siguiente y se AÑADE (para mover todo junto al final).
+    $<HTMLInputElement>("from").value = String(next + 1);
+    void search({ keep: true });
+  };
   $("export").hidden = false;
 }
 
@@ -502,7 +551,12 @@ async function moveAll() {
   const to = getAddress(dest);
   $<HTMLButtonElement>("moveall").disabled = true;
   try {
-    for (const h of holdings) {
+    const picked = holdings.filter(isSelected);
+    if (!picked.length) {
+      log("No hay nada marcado en «Mover». Marca la dirección o direcciones que quieres sacar.", "bad");
+      return;
+    }
+    for (const h of picked) {
       const c = getChain(h.chain);
       const label = `${formatUnits(h.balance, h.asset.decimals)} ${h.asset.symbol} de la dirección nº ${h.note.nonce + 1} en ${c.name}`;
       try {
@@ -587,7 +641,7 @@ async function moveAll() {
         );
       } catch (e) {
         console.error("[Rescate]", label, e);
-        log(`${label}: ${describeError(e)} Vuelve a pulsar «Mover todo»: lo ya hecho no se repite.`, "bad");
+        log(`${label}: ${describeError(e)} Vuelve a pulsar «Mover lo marcado»: lo ya hecho no se repite.`, "bad");
       }
     }
     log("Terminado. Vuelve a «Buscar» para comprobar que no queda nada.", "info");

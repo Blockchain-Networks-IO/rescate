@@ -57,10 +57,10 @@ export interface RescueNote {
 }
 
 /** Los Safes de los nonces `0..count-1` para cada juego de claves. Sin red. */
-export async function rescueNotes(keySets: StealthMasterKeys[], count: number): Promise<RescueNote[]> {
+export async function rescueNotes(keySets: StealthMasterKeys[], count: number, from = 0): Promise<RescueNote[]> {
   const out: RescueNote[] = [];
   for (let k = 0; k < keySets.length; k++) {
-    for (let n = 0; n < count; n++) {
+    for (let n = from; n < from + count; n++) {
       const acc = deriveStealthAccount(keySets[k]!, { nonce: BigInt(n) });
       const safe = await counterfactualSafeAddress(acc.address);
       out.push({ keySet: k, nonce: n, owner: acc.address, ownerKey: acc.stealthPrivateKey, safe });
