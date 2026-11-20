@@ -33,6 +33,7 @@ import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { QRCodeSVG } from "qrcode.react";
 import { connectWalletConnect, type WcSession } from "./walletConnect";
+import { fluidkeyExtraAssets, fluidkeyKeygenMessage, fluidkeyNotes, fluidkeyProfile } from "./fluidkey";
 import {
   RESCUE_CHAINS,
   assetsFor,
@@ -41,11 +42,15 @@ import {
   exportCsv,
   isDeployed,
   readHoldings,
+  redeemCall,
+  setMuchoRpcBase,
   rescueChain,
   rescueClient,
   rescueNotes,
   safeNonce,
   transferCall,
+  vaultMaxRedeem,
+  vaultPreview,
   type RescueAsset,
   type RescueHolding,
   type RescueNote,
@@ -63,6 +68,38 @@ function log(text: string, kind: "ok" | "bad" | "info" = "info") {
   p.className = kind;
   p.textContent = text;
   $("movelog").appendChild(p);
+}
+
+// ── Qué se rescata: direcciones de depósito de Mucho o una cuenta de Fluidkey ──
+type Mode = "mucho" | "fluidkey";
+function mode(): Mode {
+  return $<HTMLInputElement>("modefluidkey").checked ? "fluidkey" : "mucho";
+}
+/** El PIN de Fluidkey tal cual se escribió (forma parte del mensaje firmado). */
+function fluidkeyPin(): string {
+  return $<HTMLInputElement>("fkpin").value;
+}
+/** El mensaje que firma la cuenta: el de Mucho (PIN vacío) o el de Fluidkey con su PIN. */
+function keygenMessage(address: Address): string {
+  return mode() === "fluidkey" ? fluidkeyKeygenMessage(address, fluidkeyPin()) : buildStealthKeygenMessage({ address });
+}
+function onModeChange() {
+  const fk = mode() === "fluidkey";
+  $("fkonly").hidden = !fk;
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>(".muchoonly"))) el.hidden = fk;
+  for (const el of Array.from(document.querySelectorAll<HTMLElement>(".fkonlyinline"))) el.hidden = !fk;
+  // Fluidkey opera sobre todo en Base, pero también en las demás: se miran todas.
+  for (const c of RESCUE_CHAINS) {
+    const box = document.getElementById(`chain-${c}`) as HTMLInputElement | null;
+    if (box) box.checked = fk ? c !== "bnb" && c !== "hyperevm" : c === "arbitrum" || c === "base";
+  }
+  // Las claves calculadas con el otro modo no valen: hay que volver a firmar.
+  keySets = null;
+  $("search").hidden = true;
+  $("move").hidden = true;
+  $("export").hidden = true;
+  $("keysres").innerHTML = "";
+  showMessageToSign();
 }
 
 // ── Billeteras del navegador (EIP-6963, y window.ethereum si no anuncia) ──
@@ -139,6 +176,7 @@ function paintQr(uri: string | null) {
   const box = $("wcqr");
   if (!uri) {
     qrRoot?.unmount();
+void detectMuchoRpc();
     qrRoot = null;
     box.innerHTML = "";
     return;
@@ -212,7 +250,9 @@ function useSignature(address: Address, signature: Hex) {
   anchor = address;
   say(
     "keysres",
-    `Claves calculadas para ${address}. Ahora busca. (Meta-dirección: ${keySets[0]!.metaAddress.slice(0, 26)}…)`,
+    mode() === "fluidkey"
+      ? `Claves de Fluidkey calculadas para ${address}${fluidkeyPin() ? " con el PIN que has escrito" : " SIN PIN"}. Ahora busca. Si no aparece nada, lo más probable es el PIN: prueba otro y vuelve a firmar.`
+      : `Claves calculadas para ${address}. Ahora busca. (Meta-dirección: ${keySets[0]!.metaAddress.slice(0, 26)}…)`,
     "ok",
   );
   $("search").hidden = false;
@@ -222,7 +262,7 @@ async function signWithWallet() {
   if (!connected) return;
   try {
     const client = createWalletClient({ account: connected.address, transport: custom(connected.provider) });
-    const message = buildStealthKeygenMessage({ address: connected.address });
+    const message = keygenMessage(connected.address);
     const signature = await client.signMessage({ account: connected.address, message });
     useSignature(connected.address, signature);
   } catch (e) {
@@ -232,7 +272,7 @@ async function signWithWallet() {
 
 function showMessageToSign() {
   const a = $<HTMLInputElement>("pasteaddr").value.trim();
-  $<HTMLTextAreaElement>("pastemsg").value = isAddress(a) ? buildStealthKeygenMessage({ address: getAddress(a) }) : "";
+  $<HTMLTextAreaElement>("pastemsg").value = isAddress(a) ? keygenMessage(getAddress(a)) : "";
 }
 
 async function usePasted() {
@@ -241,7 +281,7 @@ async function usePasted() {
   if (!isAddress(a)) return say("keysres", "Esa dirección no es válida.", "bad");
   if (!isHex(sig) || sig.length !== 132) return say("keysres", "La firma tiene que ser 0x seguido de 130 caracteres.", "bad");
   const address = getAddress(a);
-  const message = buildStealthKeygenMessage({ address });
+  const message = keygenMessage(address);
   const signer = await recoverMessageAddress({ message, signature: sig as Hex }).catch(() => null);
   if (signer !== address) {
     return say("keysres", "Esa firma no es de esa dirección sobre el mensaje de arriba. Revisa que firmaste el texto EXACTO.", "bad");
@@ -254,7 +294,7 @@ async function useKey() {
   const key = (k.startsWith("0x") ? k : `0x${k}`) as Hex;
   try {
     const acc = privateKeyToAccount(key);
-    const signature = await acc.signMessage({ message: buildStealthKeygenMessage({ address: acc.address }) });
+    const signature = await acc.signMessage({ message: keygenMessage(acc.address) });
     $<HTMLInputElement>("pkey").value = "";
     useSignature(acc.address, signature);
   } catch {
@@ -267,14 +307,14 @@ async function useSeed() {
   if (!m.ok) return say("keysres", m.reason, "bad");
   const index = Math.max(0, Number($<HTMLInputElement>("seedindex").value || "1") - 1);
   const acc = seedEvmAccount(m.mnemonic, index);
-  const signature = await acc.signMessage({ message: buildStealthKeygenMessage({ address: acc.address }) });
+  const signature = await acc.signMessage({ message: keygenMessage(acc.address) });
   $<HTMLTextAreaElement>("seed").value = "";
   useSignature(acc.address, signature);
 }
 
 // ── Buscar ──
 let notes: RescueNote[] = [];
-let holdings: Array<RescueHolding & { chain: ChainKey; deployed: boolean }> = [];
+let holdings: Array<RescueHolding & { chain: ChainKey; deployed: boolean; underlying?: string }> = [];
 
 function selectedChains(): ChainKey[] {
   return RESCUE_CHAINS.filter((c) => $<HTMLInputElement>(`chain-${c}`).checked);
@@ -298,19 +338,31 @@ async function extraAssets(): Promise<RescueAsset[]> {
 
 async function search() {
   if (!keySets) return;
-  const count = Math.min(500, Math.max(1, Number($<HTMLInputElement>("count").value || "40")));
-  $("searchres").innerHTML = `<p class="info">Calculando ${count} direcciones y leyendo saldos…</p>`;
+  const fk = mode() === "fluidkey";
+  // En Fluidkey cada nonce son tantos Safes como configuraciones: tope más bajo.
+  const count = Math.min(fk ? 200 : 500, Math.max(1, Number($<HTMLInputElement>("count").value || "40")));
+  $("searchres").innerHTML = `<p class="info">Calculando ${count} direcciones${fk ? " (cada una en todas las configuraciones de Fluidkey)" : ""} y leyendo saldos…</p>`;
   try {
-    notes = await rescueNotes(keySets, count);
-    const extra = await extraAssets();
+    notes = fk
+      ? fluidkeyNotes(keySets, count, { derivationChainId: Number($<HTMLInputElement>("fkchainid").value || "0") })
+      : await rescueNotes(keySets, count);
+    const typed = await extraAssets();
     holdings = [];
     const failures: string[] = [];
     for (const chain of selectedChains()) {
       const client = rescueClient(chain, rpcOf(chain));
+      const extra = fk ? [...typed, ...fluidkeyExtraAssets(chain)] : typed;
       const { holdings: found, failed } = await readHoldings(client, notes, assetsFor(chain, extra));
       if (failed) failures.push(`${getChain(chain).name}: ${failed} lecturas fallidas`);
       for (const h of found) {
-        holdings.push({ ...h, chain, deployed: await isDeployed(client, h.note.safe).catch(() => false) });
+        let underlying: string | undefined;
+        if (h.asset.vault && h.asset.token) {
+          // Participaciones de una bóveda: se dice lo que valen en lo de debajo.
+          underlying = await vaultPreview(client, h.asset.token, h.balance)
+            .then((p) => `≈ ${formatUnits(p.assets, p.decimals)} ${p.symbol}`)
+            .catch(() => undefined);
+        }
+        holdings.push({ ...h, chain, underlying, deployed: await isDeployed(client, h.note.safe).catch(() => false) });
       }
     }
     paintHoldings(failures);
@@ -331,7 +383,7 @@ function paintHoldings(failures: string[]) {
     // Sin saldo LEÍDO no se afirma que no haya: ya se ha dicho qué falló.
   } else if (!holdings.length) {
     parts.push(
-      `<p class="info">No hay saldo en estas ${notes.length / (keySets?.length || 1)} direcciones en las redes elegidas. Si sabes que tenías, sube «cuántas direcciones», añade el token o revisa que firmaste con la cuenta correcta.</p>`,
+      `<p class="info">No hay saldo en estas ${new Set(notes.map((n) => n.nonce)).size} direcciones${notes.some((n) => n.fluidkeyProfile) ? " (en todas las configuraciones de Fluidkey)" : ""} en las redes elegidas. Si sabes que tenías, sube «cuántas direcciones», añade el token o revisa que firmaste con la cuenta correcta${notes.some((n) => n.fluidkeyProfile) ? " y con tu PIN de Fluidkey" : ""}.</p>`,
     );
   } else {
     // Si solo uno de los dos juegos de claves tiene saldo, es el bueno: se dice.
@@ -343,9 +395,11 @@ function paintHoldings(failures: string[]) {
           .map((h) => {
             const c = getChain(h.chain);
             const link = c.explorer ? `${c.explorer}/address/${h.note.safe}` : "#";
-            return `<tr><td>${h.note.nonce + 1}${sets.size > 1 ? ` (${h.note.keySet + 1})` : ""}</td><td>${esc(c.name)}</td><td>${esc(
-              formatUnits(h.balance, h.asset.decimals),
-            )} ${esc(h.asset.symbol)}</td><td><a href="${esc(link)}" target="_blank" rel="noreferrer"><code>${h.note.safe.slice(
+            const profile = h.note.fluidkeyProfile ? ` <span class="muted">· ${esc(fluidkeyProfile(h.note.fluidkeyProfile).label)}</span>` : "";
+            const amount = h.asset.vault
+              ? `${esc(h.underlying ?? "valor sin leer")} <span class="muted">(en la bóveda ${esc(h.asset.symbol)}; se saca al destino como el activo de debajo)</span>`
+              : `${esc(formatUnits(h.balance, h.asset.decimals))} ${esc(h.asset.symbol)}`;
+            return `<tr><td>${h.note.nonce + 1}${sets.size > 1 ? ` (${h.note.keySet + 1})` : ""}${profile}</td><td>${esc(c.name)}</td><td>${amount}</td><td><a href="${esc(link)}" target="_blank" rel="noreferrer"><code>${h.note.safe.slice(
               0,
               10,
             )}…</code></a></td><td>${h.deployed ? "sí" : "no (se despliega al sacar)"}</td></tr>`;
@@ -449,13 +503,50 @@ async function moveAll() {
           log(`${label}: ya está vacío.`, "info");
           continue;
         }
-        const exec = await buildExecTransaction({
-          chainId: c.evmChainId!,
-          safe: h.note.safe,
-          safeNonce: await safeNonce(reader, h.note.safe),
-          ownerKey: h.note.ownerKey,
-          call: transferCall(h.asset, to, balance),
-        });
+        const nonce = await safeNonce(reader, h.note.safe);
+        const execFor = (call: { to: Address; value: bigint; data: Hex }) =>
+          buildExecTransaction({ chainId: c.evmChainId!, safe: h.note.safe, safeNonce: nonce, ownerKey: h.note.ownerKey, call });
+        /** Se simula antes de enviar: si fuera a revertir, no se gasta gas. */
+        const simulate = async (exec: { to: Address; data: Hex }) => {
+          try {
+            await reader.call({ account: payer.address, to: exec.to, data: exec.data });
+            return null;
+          } catch (e) {
+            return describeError(e);
+          }
+        };
+        let exec = await execFor(transferCall(h.asset, to, balance));
+        if (h.asset.vault && h.asset.token) {
+          // Primero se intenta sacar el activo de debajo (USDC, EURC…) con
+          // `redeem`. Algunas bóvedas no lo dejan en un momento dado (sin
+          // liquidez, o Morpho V2 con su adaptador parado: «Fluidkey USDC Yield
+          // by KPK» el 20-11-2026). Entonces se mueven las PARTICIPACIONES a tu
+          // destino: dejan de depender de las claves de Fluidkey y se canjean
+          // después desde tu billetera. `maxRedeem` no vale para decidirlo: las
+          // bóvedas Morpho V2 devuelven siempre 0.
+          const redeem = await execFor(redeemCall(h.asset, to, balance, h.note.safe));
+          const why = await simulate(redeem);
+          if (!why) {
+            exec = redeem;
+          } else {
+            const max = await vaultMaxRedeem(reader, h.asset.token, h.note.safe).catch(() => 0n);
+            const partial = max > 0n && max < balance ? await execFor(redeemCall(h.asset, to, max, h.note.safe)) : null;
+            if (partial && !(await simulate(partial))) {
+              log(`${label}: la bóveda solo deja sacar una parte ahora; se saca esa parte y el resto se queda dentro (vuelve a pulsar más tarde).`, "info");
+              exec = partial;
+            } else {
+              log(
+                `${label}: la bóveda no deja sacar el dinero ahora mismo (${why}). Se mueven las participaciones a tu destino: allí puedes canjearlas cuando vuelva a dejar, desde la web de la bóveda o cualquier billetera.`,
+                "info",
+              );
+            }
+          }
+        }
+        const why = await simulate(exec);
+        if (why) {
+          log(`${label}: la simulación dice que fallaría, no se envía (${why}).`, "bad");
+          continue;
+        }
         const hash = await payer.client.sendTransaction({
           account: payer.client.account ?? payer.address,
           chain: payer.client.chain,
@@ -484,8 +575,36 @@ function download() {
   const blob = new Blob([exportCsv(notes, withKeys)], { type: "text/csv" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `direcciones-de-deposito-${anchor ?? "cuenta"}.csv`;
+  a.download = `${mode() === "fluidkey" ? "fluidkey" : "direcciones-de-deposito"}-${anchor ?? "cuenta"}.csv`;
   a.click();
+}
+
+// ── El nodo de Mucho, si la página se abre desde nuestra web ──
+/**
+ * Abierta desde wallet.mucho.finance, las lecturas van primero por el nodo del
+ * monedero (el mismo que la app: más fiable que los públicos, que cortan por
+ * límite de peticiones), y si falla, a los públicos. Se comprueba que el proxy
+ * conteste antes de usarlo: copiada a otra web o abierta desde el disco no
+ * existe y se usan los públicos, como siempre.
+ */
+async function detectMuchoRpc() {
+  if (!location.protocol.startsWith("http")) return;
+  const base = location.pathname.replace(/\/[^/]*$/, "");
+  try {
+    const r = await fetch(`${base}/api/rpc/42161`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }),
+    });
+    const j = (await r.json()) as { result?: string };
+    if (j.result === "0xa4b1") {
+      setMuchoRpcBase(`${location.origin}${base}`);
+      $("rpcnote").textContent =
+        "Abierta desde la web de Mucho: las lecturas van primero por el nodo de Mucho y, si falla, por los públicos de abajo. Si escribes un RPC tuyo, manda el tuyo.";
+    }
+  } catch (e) {
+    console.warn("[Rescate] sin nodo de Mucho en esta web, se usan los públicos:", e);
+  }
 }
 
 // ── Montaje ──
@@ -498,6 +617,19 @@ function mount() {
   }).join("");
   $("extrachain").innerHTML = RESCUE_CHAINS.map((c) => `<option value="${c}">${esc(getChain(c).name)}</option>`).join("");
   $("walletsignbtn").onclick = () => void signWithWallet();
+  $("modemucho").onchange = onModeChange;
+  $("modefluidkey").onchange = onModeChange;
+  $("fkpin").oninput = () => {
+    // Cambiar el PIN cambia el mensaje: lo firmado antes ya no vale.
+    keySets = null;
+    $("search").hidden = true;
+    showMessageToSign();
+  };
+  // `?modo=fluidkey` abre directamente en el modo Fluidkey (enlace del aviso).
+  if (new URLSearchParams(location.search).get("modo") === "fluidkey" || location.hash === "#fluidkey") {
+    $<HTMLInputElement>("modefluidkey").checked = true;
+    onModeChange();
+  }
   $("pasteaddr").oninput = showMessageToSign;
   $("pastebtn").onclick = () => void usePasted();
   $("pkeybtn").onclick = () => void useKey();
@@ -507,3 +639,4 @@ function mount() {
   $("exportbtn").onclick = download;
 }
 mount();
+void detectMuchoRpc();

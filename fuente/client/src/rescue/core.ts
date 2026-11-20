@@ -25,6 +25,7 @@ import {
   fallback,
   hashTypedData,
   http,
+  parseAbi,
   zeroAddress,
   type Address,
   type Chain,
@@ -36,6 +37,7 @@ import { getChain, type ChainKey } from "@shared/wallet/chains";
 import { knownTokens } from "@shared/wallet/knownTokens";
 import { counterfactualSafeAddress, counterfactualSafeDeployment } from "@shared/wallet/safeAddress";
 import { deriveStealthAccount, type StealthMasterKeys } from "@/lib/web3/stealth/derive";
+import { fluidkeyDeployCall, fluidkeyProfile, fluidkeySafeAddress } from "./fluidkey";
 
 /** Redes donde se buscan, en este orden. HyperEVM y Robinhood van aparte (sin indexador ni prisa). */
 export const RESCUE_CHAINS: ChainKey[] = ["arbitrum", "base", "ethereum", "optimism", "polygon", "bnb", "hyperevm"];
@@ -47,6 +49,11 @@ export interface RescueNote {
   owner: Address;
   ownerKey: Hex;
   safe: Address;
+  /**
+   * Solo en modo Fluidkey (`fluidkey.ts`): con qué configuración se calculó el
+   * Safe (1.3.0, sin módulo 4337). Sin él es un Safe de Mucho.
+   */
+  fluidkeyProfile?: string;
 }
 
 /** Los Safes de los nonces `0..count-1` para cada juego de claves. Sin red. */
@@ -68,6 +75,11 @@ export interface RescueAsset {
   /** `null` = moneda nativa. */
   token: Address | null;
   decimals: number;
+  /**
+   * Participaciones de una bóveda ERC-4626 (el auto-earn de Fluidkey): se
+   * sacan con `redeem`, que manda al destino el activo de debajo.
+   */
+  vault?: boolean;
 }
 
 /** Lo que se mira en cada red: nativo + tokens del catálogo + los añadidos a mano. */
@@ -116,11 +128,31 @@ const BACKUP_RPC: Partial<Record<ChainKey, string>> = {
   hyperevm: "https://rpc.hyperliquid.xyz/evm",
 };
 
-/** Los RPC que se usan, en orden: el elegido (o el de por defecto) y el de respaldo. */
-export function rescueRpcUrls(chain: ChainKey, rpcUrl?: string): string[] {
-  const first = rescueChain(chain, rpcUrl).rpcUrls.default.http[0]!;
+/**
+ * Nodo del propio monedero (`<base>/api/rpc/<chainId>`, el mismo proxy que usa
+ * la app: dRPC/Alchemy con nuestra clave, que nunca sale del servidor). Solo
+ * existe cuando la página se abre desde nuestra web; abierta desde el disco o
+ * desde GitHub Pages no hay a quién preguntar y se va directa a los públicos.
+ */
+let muchoRpcBase: string | null = null;
+export function setMuchoRpcBase(base: string | null): void {
+  muchoRpcBase = base;
+}
+
+/**
+ * Los RPC que se usan, en orden. PURA (con `muchoBase` explícito):
+ *  - si el usuario escribió uno, ese y el de respaldo (manda él);
+ *  - si no, el nodo de Mucho cuando lo hay, el público por defecto y el de respaldo.
+ */
+export function rescueRpcUrls(chain: ChainKey, rpcUrl?: string, muchoBase: string | null = muchoRpcBase): string[] {
+  const typed = rpcUrl?.trim();
+  const first = rescueChain(chain, typed).rpcUrls.default.http[0]!;
   const backup = BACKUP_RPC[chain];
-  return backup && backup !== first ? [first, backup] : [first];
+  const list: string[] = [];
+  if (!typed && muchoBase) list.push(`${muchoBase}/api/rpc/${getChain(chain).evmChainId}`);
+  list.push(first);
+  if (backup && backup !== first) list.push(backup);
+  return list;
 }
 
 export function rescueClient(chain: ChainKey, rpcUrl?: string): PublicClient {
@@ -151,6 +183,41 @@ export async function readHoldings(
   const holdings: RescueHolding[] = [];
   let failed = 0;
   const jobs = notes.flatMap((note) => assets.map((asset) => ({ note, asset })));
+  const multicall3 = client.chain?.contracts?.multicall3?.address;
+  if (multicall3) {
+    // Con Multicall3, en tandas grandes: el modo Fluidkey mira cientos de Safes
+    // por red (un Safe por nonce Y por configuración) y, una lectura por
+    // llamada, un RPC público corta enseguida por límite de peticiones. El
+    // nativo va con `getEthBalance` del propio Multicall3.
+    for (let i = 0; i < jobs.length; i += MULTICALL_CHUNK) {
+      const slice = jobs.slice(i, i + MULTICALL_CHUNK);
+      let results: Array<{ status: "success" | "failure"; result?: unknown }>;
+      try {
+        results = (await client.multicall({
+          allowFailure: true,
+          batchSize: 0,
+          contracts: slice.map(({ note, asset }) =>
+            asset.token
+              ? { address: asset.token, abi: erc20Abi, functionName: "balanceOf", args: [note.safe] }
+              : { address: multicall3, abi: MULTICALL3_BALANCE_ABI, functionName: "getEthBalance", args: [note.safe] },
+          ),
+        })) as Array<{ status: "success" | "failure"; result?: unknown }>;
+      } catch (e) {
+        console.warn("[Rescate] una tanda de lecturas falló entera:", e);
+        failed += slice.length;
+        continue;
+      }
+      results.forEach((r, j) => {
+        if (r.status !== "success") {
+          failed++;
+          return;
+        }
+        const balance = r.result as bigint;
+        if (balance > 0n) holdings.push({ ...slice[j]!, balance });
+      });
+    }
+    return { holdings, failed };
+  }
   const results = await Promise.allSettled(
     jobs.map(({ note, asset }) =>
       asset.token
@@ -168,6 +235,25 @@ export async function readHoldings(
   });
   return { holdings, failed };
 }
+
+/** Lecturas por petición a Multicall3 (cada una ~70 bytes: unas 35 KB de calldata). */
+const MULTICALL_CHUNK = 500;
+const MULTICALL3_BALANCE_ABI = [
+  {
+    type: "function",
+    name: "getEthBalance",
+    stateMutability: "view",
+    inputs: [{ name: "addr", type: "address" }],
+    outputs: [{ type: "uint256" }],
+  },
+] as const;
+
+const ERC4626_ABI = parseAbi([
+  "function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)",
+  "function maxRedeem(address owner) view returns (uint256)",
+  "function previewRedeem(uint256 shares) view returns (uint256)",
+  "function asset() view returns (address)",
+]);
 
 const SAFE_ABI = [
   { type: "function", name: "nonce", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
@@ -263,6 +349,41 @@ export async function buildExecTransaction(params: {
   };
 }
 
+/**
+ * Sacar participaciones de una bóveda ERC-4626: `redeem(participaciones,
+ * destino, Safe)`, que manda al destino el activo de debajo (USDC, EURC…).
+ */
+export function redeemCall(asset: RescueAsset, to: Address, shares: bigint, safe: Address): { to: Address; value: bigint; data: Hex } {
+  if (!asset.token || !asset.vault) throw new Error("redeemCall solo vale para una bóveda.");
+  return {
+    to: asset.token,
+    value: 0n,
+    data: encodeFunctionData({ abi: ERC4626_ABI, functionName: "redeem", args: [shares, to, safe] }),
+  };
+}
+
+/** Cuántas participaciones deja sacar ahora la bóveda (su liquidez puede ser menor que el saldo). */
+export async function vaultMaxRedeem(client: PublicClient, vault: Address, safe: Address): Promise<bigint> {
+  return client.readContract({ address: vault, abi: ERC4626_ABI, functionName: "maxRedeem", args: [safe] });
+}
+
+/** Lo que valen unas participaciones en el activo de debajo, y cuál es (para decirlo). */
+export async function vaultPreview(
+  client: PublicClient,
+  vault: Address,
+  shares: bigint,
+): Promise<{ assets: bigint; asset: Address; symbol: string; decimals: number }> {
+  const [assets, asset] = await Promise.all([
+    client.readContract({ address: vault, abi: ERC4626_ABI, functionName: "previewRedeem", args: [shares] }),
+    client.readContract({ address: vault, abi: ERC4626_ABI, functionName: "asset" }),
+  ]);
+  const [symbol, decimals] = await Promise.all([
+    client.readContract({ address: asset, abi: erc20Abi, functionName: "symbol" }),
+    client.readContract({ address: asset, abi: erc20Abi, functionName: "decimals" }),
+  ]);
+  return { assets, asset, symbol, decimals };
+}
+
 /** ¿Está desplegado el Safe en esta red? */
 export async function isDeployed(client: PublicClient, safe: Address): Promise<boolean> {
   const code = await client.getCode({ address: safe });
@@ -271,6 +392,13 @@ export async function isDeployed(client: PublicClient, safe: Address): Promise<b
 
 /** La llamada que lo despliega (cualquier cuenta puede enviarla). */
 export async function deployCall(note: RescueNote): Promise<{ to: Address; data: Hex }> {
+  if (note.fluidkeyProfile) {
+    const profile = fluidkeyProfile(note.fluidkeyProfile);
+    if (fluidkeySafeAddress(note.owner, profile).toLowerCase() !== note.safe.toLowerCase()) {
+      throw new Error("El despliegue no da la dirección esperada: no se envía.");
+    }
+    return fluidkeyDeployCall(note.owner, profile);
+  }
   const d = await counterfactualSafeDeployment(note.owner);
   if (d.address.toLowerCase() !== note.safe.toLowerCase()) {
     throw new Error("El despliegue no da la dirección esperada: no se envía.");
@@ -284,9 +412,13 @@ export async function safeNonce(client: PublicClient, safe: Address): Promise<bi
 
 /** Una fila para exportar (CSV): con la clave del dueño solo si se pide. */
 export function exportCsv(notes: RescueNote[], withKeys: boolean): string {
-  const head = withKeys ? "nonce,safe,dueno,clave_privada_del_dueno" : "nonce,safe,dueno";
+  // En modo Fluidkey cada nonce tiene un Safe por configuración: va su columna.
+  const fk = notes.some((n) => n.fluidkeyProfile);
+  const head = ["nonce", ...(fk ? ["configuracion"] : []), "safe", "dueno", ...(withKeys ? ["clave_privada_del_dueno"] : [])];
   const rows = notes.map((n) =>
-    withKeys ? `${n.nonce},${n.safe},${n.owner},${n.ownerKey}` : `${n.nonce},${n.safe},${n.owner}`,
+    [n.nonce, ...(fk ? [n.fluidkeyProfile ?? ""] : []), n.safe, n.owner, ...(withKeys ? [n.ownerKey] : [])].join(","),
   );
-  return [head, ...rows].join("\n") + "\n";
+  rows.unshift(head.join(","));
+  return rows.join("\n") + "\n";
 }
+

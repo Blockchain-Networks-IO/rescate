@@ -45,7 +45,7 @@ const html = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Rescate de direcciones de depósito</title>
+<title>Rescate de direcciones de depósito y de Fluidkey</title>
 <meta name="wc-project-id" content="">
 <style>
   :root{color-scheme:light dark}
@@ -69,13 +69,29 @@ const html = `<!doctype html>
 </style>
 </head>
 <body>
-<h1>Rescate de direcciones de depósito</h1>
-<p class="muted">Para sacar lo que tengas en tus direcciones de depósito de Mucho aunque Mucho no exista. Todo se calcula en este navegador: no se envía nada a ningún servidor salvo las lecturas y transacciones al RPC de cada red, que puedes cambiar por el tuyo.</p>
+<h1>Rescate de direcciones de depósito y de cuentas de Fluidkey</h1>
+<p class="muted">Para sacar lo que tengas en tus direcciones de depósito de Mucho aunque Mucho no exista, o en tu cuenta de Fluidkey sin pasar por su web. Todo se calcula en este navegador: no se envía nada a ningún servidor salvo las lecturas y transacciones al RPC de cada red, que puedes cambiar por el tuyo.</p>
+
+<fieldset><legend>¿Qué quieres rescatar?</legend>
+  <label><input type="radio" name="mode" id="modemucho" checked> Mis direcciones de depósito de Mucho Wallet</label><br>
+  <label><input type="radio" name="mode" id="modefluidkey"> Mi cuenta de Fluidkey</label>
+</fieldset>
+
+<div id="fkonly" hidden>
+  <div class="bad"><p><b>No firmes nada en la web de Fluidkey.</b> La firma que pide esta página es la llave de todo tu dinero en Fluidkey: quien la tenga puede moverlo. Hazla solo aquí, con esta página abierta desde un sitio de confianza (el repositorio público o tu propio ordenador) y comprobando su huella.</p>
+  <p>Si ya firmaste en su web el 19 de noviembre de 2026, antes de las 18:05 UTC, da esas claves por comprometidas: saca el dinero cuanto antes y a una dirección que no sea de Fluidkey.</p></div>
+  <div class="row">Tu PIN de Fluidkey <input id="fkpin" type="password" autocomplete="off" inputmode="numeric" placeholder="el que usas para entrar" style="width:12rem"></div>
+  <p class="muted">Fluidkey mete el PIN en el mensaje que se firma, así que con otro PIN salen otras claves (y no se encuentra nada). Si nunca pusiste PIN, déjalo vacío. Firma con la MISMA cuenta con la que entras en Fluidkey (MetaMask, Rabby, Ledger…).</p>
+  <details><summary>Avanzado</summary>
+    <div class="row">Cadena de la derivación <input id="fkchainid" type="number" min="0" value="0" style="width:8rem"></div>
+    <p class="muted">Fluidkey usa 0 (el mismo cobro vale en todas las redes). Cámbialo solo si sabes que tu cuenta usó otro.</p>
+  </details>
+</div>
 
 <h2>1. Tus claves</h2>
-<p class="muted">Las direcciones de depósito de cada cuenta salen de UNA firma de esa cuenta sobre un mensaje fijo. Consíguela de cualquiera de estas formas (la primera es la más cómoda y no te pide la frase):</p>
+<p class="muted">Las direcciones salen de UNA firma de tu cuenta sobre un mensaje fijo. Consíguela de cualquiera de estas formas (la primera es la más cómoda y no te pide la frase):</p>
 <fieldset><legend>Conectar una billetera</legend>
-  <p class="muted">MetaMask, Rabby, OKX, la extensión de OneKey… (y un Ledger a través de ellas), o la billetera del móvil por WalletConnect, con tu frase de Mucho importada; o el aparato que usabas en Mucho.</p>
+  <p class="muted">MetaMask, Rabby, OKX, la extensión de OneKey… (y un Ledger a través de ellas), o la billetera del móvil por WalletConnect<span class="muchoonly">, con tu frase de Mucho importada; o el aparato que usabas en Mucho</span><span class="fkonlyinline" hidden>: la misma con la que entras en Fluidkey</span>.</p>
   <div class="row" id="wallets"></div>
   <div class="row" id="wcprojectrow" hidden>Project ID de WalletConnect <input id="wcproject" placeholder="de dashboard.reown.com" style="flex:1"></div>
   <div id="wcqr"></div>
@@ -102,6 +118,8 @@ const html = `<!doctype html>
 <div id="search" hidden>
 <h2>2. Buscar</h2>
 <div class="row">Cuántas direcciones mirar <input id="count" type="number" min="1" max="500" value="40" style="width:6rem"></div>
+<p class="muted fkonlyinline" hidden>Cada dirección de Fluidkey se mira en todas las configuraciones con las que Fluidkey ha creado cuentas (con y sin auto-earn), y también sus bóvedas de auto-earn en Base. Si tenías muchos cobros, sube el número.</p>
+<p class="muted" id="rpcnote">Cada red se lee por un nodo público (el de la casilla) y, si falla, por otro de respaldo. Puedes poner el tuyo. Una lectura que falla se dice: nunca se da por cero.</p>
 <div id="chains"></div>
 <div class="row">Añadir un token: <select id="extrachain"></select> <input id="extratoken" placeholder="contrato 0x…" style="flex:1"></div>
 <div class="row"><button id="searchbtn">Buscar</button></div>
@@ -128,7 +146,15 @@ const html = `<!doctype html>
 </div>
 
 <details>
-  <summary>Cómo hacerlo sin esta página (parámetros exactos)</summary>
+  <summary>Cuentas de Fluidkey: cómo lo hace (parámetros exactos)</summary>
+  <ul>
+    <li><b>Mensaje</b>: <code>generateFluidkeyMessage({ pin, address })</code> de <code>@fluidkey/stealth-account-kit</code> con TU PIN, firmado con <code>personal_sign</code>. Las claves y las direcciones salen igual que abajo, con <code>chainId</code> 0.</li>
+    <li><b>Safe</b>: Safe 1.3.0 (factoría <code>0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2</code>, singleton <code>0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552</code>, fallback handler <code>0xf48f2B2d2a534e402487b3ee7C18c33Aec0Fe5e4</code>), un dueño, umbral 1, <code>saltNonce</code> 0, y el <code>to</code>/<code>data</code> del <code>setup</code> de cada configuración de auto-earn (la lista va en el código fuente publicado, con un Safe real de cada una). Es lo que hace SARA (github.com/shahnami/sara), con más configuraciones.</li>
+    <li><b>Auto-earn</b>: el dinero está en participaciones de una bóveda ERC-4626; se saca con <code>redeem(participaciones, destino, Safe)</code> dentro del <code>execTransaction</code>.</li>
+  </ul>
+</details>
+<details>
+  <summary>Direcciones de depósito de Mucho: cómo hacerlo sin esta página (parámetros exactos)</summary>
   <ul>
     <li><b>Mensaje</b>: el de Fluidkey con PIN vacío para la dirección de la cuenta (<code>generateFluidkeyMessage({ pin: "", address })</code> del paquete <code>@fluidkey/stealth-account-kit</code>), firmado con <code>personal_sign</code>.</li>
     <li><b>Claves</b>: <code>generateKeysFromSignature</code> (keccak de r y de s). Si la firma no reproduce tu capa, prueba con la otra forma de s (n − s).</li>
