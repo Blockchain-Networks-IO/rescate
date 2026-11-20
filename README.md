@@ -9,8 +9,8 @@ directamente con la cadena de bloques.
 - **Descargarla:** `rescate.html` de la [última versión](https://github.com/Blockchain-Networks-IO/rescate/releases/latest).
   Guárdala junto a la copia de tu frase de recuperación.
 
-Versión del 2026-11-20 (código 1a38b300e86b).
-SHA-256 de `rescate.html`: `6b95f1f36f5805f041e2ee10a1e58c6741d7988fb794ee45c01d3d8f11edd19d`
+Versión del 2026-11-20 (código 7264d84de7ec).
+SHA-256 de `rescate.html`: `9c4e02574d6d3ba452aad9c38ca766169f892811c397cb49880ac0a91c9cca0f`
 
 ## ¿Cuándo la necesitas?
 

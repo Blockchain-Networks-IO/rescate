@@ -349,22 +349,48 @@ async function search() {
     const typed = await extraAssets();
     holdings = [];
     const failures: string[] = [];
-    for (const chain of selectedChains()) {
-      const client = rescueClient(chain, rpcOf(chain));
-      const extra = fk ? [...typed, ...fluidkeyExtraAssets(chain)] : typed;
-      const { holdings: found, failed } = await readHoldings(client, notes, assetsFor(chain, extra));
-      if (failed) failures.push(`${getChain(chain).name}: ${failed} lecturas fallidas`);
-      for (const h of found) {
-        let underlying: string | undefined;
-        if (h.asset.vault && h.asset.token) {
-          // Participaciones de una bóveda: se dice lo que valen en lo de debajo.
-          underlying = await vaultPreview(client, h.asset.token, h.balance)
-            .then((p) => `≈ ${formatUnits(p.assets, p.decimals)} ${p.symbol}`)
-            .catch(() => undefined);
+    // Todas las redes a la vez, con el progreso de cada una a la vista: sin él,
+    // una búsqueda de un minuto parecía colgada.
+    const chains = selectedChains();
+    const progress = new Map<ChainKey, string>(chains.map((c) => [c, "empezando"]));
+    const paintProgress = () => {
+      $("searchres").innerHTML =
+        `<p class="info">Leyendo saldos de ${new Set(notes.map((n) => n.nonce)).size} direcciones${fk ? " (en todas las configuraciones de Fluidkey)" : ""}…</p>` +
+        `<ul class="muted">${chains.map((c) => `<li>${esc(getChain(c).name)}: ${esc(progress.get(c) ?? "")}</li>`).join("")}</ul>`;
+    };
+    paintProgress();
+    await Promise.all(
+      chains.map(async (chain) => {
+        const client = rescueClient(chain, rpcOf(chain));
+        const extra = fk ? [...typed, ...fluidkeyExtraAssets(chain)] : typed;
+        const { holdings: found, failed } = await readHoldings(client, notes, assetsFor(chain, extra), (done, total) => {
+          progress.set(chain, `${Math.round((done / Math.max(1, total)) * 100)} %`);
+          paintProgress();
+        });
+        if (failed) failures.push(`${getChain(chain).name}: ${failed} lecturas fallidas`);
+        if (found.length) {
+          progress.set(chain, `comprobando ${found.length} ${found.length === 1 ? "saldo" : "saldos"}…`);
+          paintProgress();
         }
-        holdings.push({ ...h, chain, underlying, deployed: await isDeployed(client, h.note.safe).catch(() => false) });
-      }
-    }
+        const checked = await Promise.all(
+          found.map(async (h) => {
+            // Participaciones de una bóveda: se dice lo que valen en lo de debajo.
+            const underlying =
+              h.asset.vault && h.asset.token
+                ? await vaultPreview(client, h.asset.token, h.balance)
+                    .then((p) => `≈ ${formatUnits(p.assets, p.decimals)} ${p.symbol}`)
+                    .catch(() => undefined)
+                : undefined;
+            return { ...h, chain, underlying, deployed: await isDeployed(client, h.note.safe).catch(() => false) };
+          }),
+        );
+        holdings.push(...checked);
+        progress.set(chain, found.length ? `${found.length} con saldo` : failed ? "con lecturas fallidas" : "nada");
+        paintProgress();
+      }),
+    );
+    // Mismo orden siempre: por red (el de la lista) y por número de dirección.
+    holdings.sort((x, y) => chains.indexOf(x.chain) - chains.indexOf(y.chain) || x.note.nonce - y.note.nonce);
     paintHoldings(failures);
   } catch (e) {
     say("searchres", `No se pudo buscar: ${(e as Error).message}`, "bad");

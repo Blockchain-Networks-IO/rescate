@@ -179,6 +179,7 @@ export async function readHoldings(
   client: PublicClient,
   notes: RescueNote[],
   assets: RescueAsset[],
+  onProgress?: (done: number, total: number) => void,
 ): Promise<{ holdings: RescueHolding[]; failed: number }> {
   const holdings: RescueHolding[] = [];
   let failed = 0;
@@ -188,9 +189,15 @@ export async function readHoldings(
     // Con Multicall3, en tandas grandes: el modo Fluidkey mira cientos de Safes
     // por red (un Safe por nonce Y por configuración) y, una lectura por
     // llamada, un RPC público corta enseguida por límite de peticiones. El
-    // nativo va con `getEthBalance` del propio Multicall3.
-    for (let i = 0; i < jobs.length; i += MULTICALL_CHUNK) {
-      const slice = jobs.slice(i, i + MULTICALL_CHUNK);
+    // nativo va con `getEthBalance` del propio Multicall3. Las tandas van de
+    // `MULTICALL_PARALLEL` en `MULTICALL_PARALLEL`: una detrás de otra, 40
+    // direcciones en Base eran ~30 peticiones seguidas y la página parecía
+    // colgada (20-11-2026).
+    const chunks: Array<typeof jobs> = [];
+    for (let i = 0; i < jobs.length; i += MULTICALL_CHUNK) chunks.push(jobs.slice(i, i + MULTICALL_CHUNK));
+    let done = 0;
+    onProgress?.(0, chunks.length);
+    const readChunk = async (slice: typeof jobs) => {
       let results: Array<{ status: "success" | "failure"; result?: unknown }>;
       try {
         results = (await client.multicall({
@@ -205,7 +212,9 @@ export async function readHoldings(
       } catch (e) {
         console.warn("[Rescate] una tanda de lecturas falló entera:", e);
         failed += slice.length;
-        continue;
+        return;
+      } finally {
+        onProgress?.(++done, chunks.length);
       }
       results.forEach((r, j) => {
         if (r.status !== "success") {
@@ -215,6 +224,9 @@ export async function readHoldings(
         const balance = r.result as bigint;
         if (balance > 0n) holdings.push({ ...slice[j]!, balance });
       });
+    };
+    for (let i = 0; i < chunks.length; i += MULTICALL_PARALLEL) {
+      await Promise.all(chunks.slice(i, i + MULTICALL_PARALLEL).map(readChunk));
     }
     return { holdings, failed };
   }
@@ -238,6 +250,8 @@ export async function readHoldings(
 
 /** Lecturas por petición a Multicall3 (cada una ~70 bytes: unas 35 KB de calldata). */
 const MULTICALL_CHUNK = 500;
+/** Tandas a la vez por red: pocas, para no chocar con el límite de un RPC público. */
+const MULTICALL_PARALLEL = 4;
 const MULTICALL3_BALANCE_ABI = [
   {
     type: "function",
